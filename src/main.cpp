@@ -4,10 +4,25 @@
 #include <ESP8266WiFi.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <AnimatedGIF.h>
+
+/**
+ * TODO
+ * 1. Additional text colors (orange anyways)
+ * 2. Figure out if direct image processing would work
+ * 3. Text color coding
+ * 4. Text Jump commands
+ * 
+ * 
+ * 
+**/
 
 // WIFI credentials
 const char* ssid = "OpenWrt";
 const char* password = "13nonelephant";
+
+// for image support
+AnimatedGIF gif;
 
 // TCP server at port 80, IP 192.168.26.160 will respond to HTTP requests
 IPAddress local_ip(192,168,26,160);
@@ -152,7 +167,11 @@ void testDrawText(){
 const char* PARAM_INPUT_1 = "input1";
 const char* PARAM_INPUT_2 = "input2";
 
-// HTML web page to handle input field
+/*    <form action="/get">
+    Input Data: <input type="text" name="input2">
+    <input type="submit" value="Submit">*/
+
+// HTML web page to handle input field (note: uses raw literal strings)
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head>
   <title>ESP Input Form</title>
@@ -162,10 +181,88 @@ const char index_html[] PROGMEM = R"rawliteral(
     Input Text: <input type="text" name="input1">
     <input type="submit" value="Submit">
   </form><br>
-    <form action="/get">
-    Input Data: <input type="text" name="input2">
-    <input type="submit" value="Submit">
-  </form><br>
+  <form method="post" enctype="multipart/form-data">
+    <input type="file" name="input2">
+    <input class="button" type="submit" value="Upload">
+</form><br>
+  <a href="\/docs">Documentation</a>
+</body></html>)rawliteral";
+
+// HTML web page for teaching input commands
+const char tutorial_html[] PROGMEM = R"rawliteral(<!DOCTYPE HTML><html><head>
+  <title>ESP Input Form</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+table, th, td {
+  border: 1px solid black;
+  border-collapse: collapse;
+}
+th, td {
+  padding: 5px;
+}
+</style>
+  </head><body>
+<h1>Documentation</h1>
+<h2>Text Formatting Codes</h2>
+<h3>Newline &amp; Line Jumping</h3>
+<p>Newline: *nl<br />Jump to specific line (0-7 valid): *j# where # is the line number. (e.g. *j2)</p>
+<h3>Colour Codes</h3>
+<p>Eight builtin colour codes are available for use with the *c# code, where # is the letter code of the colour. Currently available colours are red (r), green (g), blue (g), cyan (c), magenta (m), yellow (y), white (w), black (x). Example: *cr, *cw.</p>
+<p>The text starts with *cw, and when a colour code is detected, it will continue writing in that colour until told otherwise. For example, in the text "White Red White", for the word "Red" to be coloured red but all other letters coloured white, the following code would have to be used: "White *crRed *cwWhite"</p>
+<h2>Inputting Images</h2>
+<p>todo</p>
+<h2>Error Codes</h2>
+<p>Whenever new data is entered into the device (either text or image data), it will return an error code on the "submit" page. Below are all error codes, and their meanings:</p>
+<table>
+<tbody>
+<tr>
+<th>Value</th>
+<th>Category</th>
+<th>Description</th>
+</tr>
+ <tr>
+<td>-3</td>
+<td>Generic</td>
+<td>Function Not Implemented</td>
+</tr>
+<tr>
+<td>-2</td>
+<td>Input</td>
+<td>Failure to Process Data, Check for Incorrect Usage</td>
+</tr>
+<tr>
+<td>-1</td>
+<td>Generic</td>
+<td>Reserved for Future Use</td>
+</tr>
+<tr>
+<td>0</td>
+<td>Generic</td>
+<td>OK</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Text</td>
+<td>Attempted to Draw Line Outside of Bounds (0-7)</td>
+<tr>
+<td>2</td>
+<td>Text</td>
+<td>Attempted to Use Invalid Colour</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Text</td>
+<td>Text Too Long for Buffer</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Image</td>
+<td>Image Size Incorrect</td>
+</tr>
+</tr>
+</tbody>
+</table>
+<a href=\"/\">Return to Home Page</a>
 </body></html>)rawliteral";
 
 void notFound(AsyncWebServerRequest *request) {
@@ -173,20 +270,20 @@ void notFound(AsyncWebServerRequest *request) {
 }
 
 void printTextLine(std::string text, int line){
-  display.clearDisplay();
   display.setTextColor(myWHITE);
   display.setCursor(2,line * 8);
   display.print(text.c_str());
 }
 
-void handleText(String inputMessage){
+int handleText(String inputMessage){
+  display.clearDisplay();
   int pos = 0; // pos value
-  char* delim = "%nl"; // value to delimit
+  char delim[] = "*nl"; // value to delimit
   int delimLen = 3; // length of delim
-  char* remaining; // input to copy to
+  char remaining[1024]; // input to copy to
   strcpy(remaining, inputMessage.c_str());
   char* pch; // pointer to next delim starting char
-  char* toprint; // for the while loop
+  char toprint[1024]; // for the while loop
   int linecount = 0; // what line we're printing on
 
   Serial.println("Looking for newlines in %" + inputMessage + "%");
@@ -199,10 +296,11 @@ void handleText(String inputMessage){
       strcpy(toprint, remaining);
       Serial.println("No newline found, copying remaining...");
     }else{
-      pos = remaining - pch;
+      pos = pch - remaining;
       Serial.println("Newline found at position " + pos);
       strncpy(toprint, remaining, pos);
-      strcpy(remaining, remaining + pos);
+      toprint[pos] = '\0';
+      strcpy(remaining, (pch + delimLen));
     }
     printTextLine(toprint, linecount);
     Serial.print("Printing line %");
@@ -210,30 +308,123 @@ void handleText(String inputMessage){
     Serial.println("%");
     linecount++;
   }
-
-
-  /* //old version
-    size_t pos = 0;
-  int count = 0;
-  std::string token;
-  std::string delimiterNL = "%nl";
-  std::string s = inputMessage.c_str();
-  Serial.println(s.c_str());
-
-  while ((pos = s.find(delimiterNL)) != std::string::npos) {
-      token = s.substr(0, pos);
-      s.erase(0, pos + delimiterNL.length());
-      printTextLine(token, count);
-      count++;
-      Serial.println(token.c_str());
-  }
-  printTextLine(s, count);
-  Serial.println(s.c_str());
-  */
+  return 0;
 }
 
-void handleImage(String inputMessage){
+int handleImage(String inputMessage){
+  Serial.printf("HandleImage called, not implemented yet!\n");
+  return -3;
+}
 
+
+//
+// The memory management functions are needed to keep operating system
+// dependencies out of the core library code
+//
+// memory allocation callback function
+void * GIFAlloc(uint32_t u32Size)
+{
+  return malloc(u32Size);
+} /* GIFAlloc() */
+// memory free callback function
+void GIFFree(void *p)
+{
+  free(p);
+} /* GIFFree() */
+
+void GIFDraw(GIFDRAW *pDraw)
+{
+    uint8_t *s;
+    uint16_t *d, *usPalette, usTemp[320];
+    int x, y;
+
+    usPalette = pDraw->pPalette;
+    y = pDraw->iY + pDraw->y; // current line
+    
+    s = pDraw->pPixels;
+    if (pDraw->ucDisposalMethod == 2) // restore to background color
+    {
+      for (x=0; x<iWidth; x++)
+      {
+        if (s[x] == pDraw->ucTransparent)
+           s[x] = pDraw->ucBackground;
+      }
+      pDraw->ucHasTransparency = 0;
+    }
+    // Apply the new pixels to the main image
+    if (pDraw->ucHasTransparency) // if transparency used
+    {
+      uint8_t *pEnd, c, ucTransparent = pDraw->ucTransparent;
+      int x, iCount;
+      pEnd = s + pDraw->iWidth;
+      x = 0;
+      iCount = 0; // count non-transparent pixels
+      while(x < pDraw->iWidth)
+      {
+        c = ucTransparent-1;
+        d = usTemp;
+        while (c != ucTransparent && s < pEnd)
+        {
+          c = *s++;
+          if (c == ucTransparent) // done, stop
+          {
+            s--; // back up to treat it like transparent
+          }
+          else // opaque
+          {
+             *d++ = usPalette[c];
+             iCount++;
+          }
+        } // while looking for opaque pixels
+        if (iCount) // any opaque pixels?
+        {
+          for(int xOffset = 0; xOffset < iCount; xOffset++ ){
+            dma_display.drawPixelRGB565(x + xOffset, y, usTemp[xOffset]);
+          }
+          x += iCount;
+          iCount = 0;
+        }
+        // no, look for a run of transparent pixels
+        c = ucTransparent;
+        while (c == ucTransparent && s < pEnd)
+        {
+          c = *s++;
+          if (c == ucTransparent)
+             iCount++;
+          else
+             s--; 
+        }
+        if (iCount)
+        {
+          x += iCount; // skip these
+          iCount = 0;
+        }
+      }
+    }
+    else
+    {
+      s = pDraw->pPixels;
+      // Translate the 8-bit pixels through the RGB565 palette (already byte reversed)
+      for (x=0; x<pDraw->iWidth; x++)
+      {
+        dma_display.drawPixelRGB565(x, y, usPalette[*s++]);
+      }
+    }
+} /* GIFDraw() */
+
+int handlegif(uint8_t *data, size_t len){
+  Serial.println("Processing gif.");
+  
+  int gif_width = data[6];
+  int gif_height = data[8];
+  Serial.printf("Gif Width: %d, height: %d\n", gif_width, gif_height);
+
+  if((gif_width < 0 || gif_height < 0) || (gif_width > matrix_width || gif_height > matrix_height)){
+    Serial.println("gif height/width out of bounds.");
+    return 10;
+  }
+
+  return 0;
 }
 
 void setup() {
@@ -261,7 +452,7 @@ void setup() {
 
   testDrawText();
   //testAllLEDs();
-  
+
   // Setup WIfi to connect to openwrt
   //WiFi.config(local_ip, gateway, subnet); // static IP assignment
   WiFi.begin(ssid, password);
@@ -290,31 +481,51 @@ void setup() {
   delay(10);
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-  request->send_P(200, "text/html", index_html);
-});
+  request->send_P(200, "text/html", index_html);});
+
+  server.on("/docs", HTTP_GET, [](AsyncWebServerRequest *request){
+  request->send_P(200, "text/html", tutorial_html);});
 
   // Send a GET request to <ESP_IP>/get?input1=<inputMessage>
   server.on("/get", HTTP_GET, [] (AsyncWebServerRequest *request) {
     String inputMessage;
     String inputParam;
+    int retval = -2;
     // GET input1 value on <ESP_IP>/get?input1=<inputMessage>
     if (request->hasParam(PARAM_INPUT_1)) {
       inputMessage = request->getParam(PARAM_INPUT_1)->value();
       inputParam = PARAM_INPUT_1;
-      handleText(inputMessage);
-    }
-    else if(request->hasParam(PARAM_INPUT_2)){
-
-    }
-    else {
+      retval = handleText(inputMessage);
+    }else if(request->hasParam(PARAM_INPUT_2)){
+      inputMessage = request->getParam(PARAM_INPUT_2)->value();
+      inputParam = PARAM_INPUT_2;
+      retval = handleImage(inputMessage);
+    }else {
       inputMessage = "No message sent";
       inputParam = "none";
     }
     Serial.println(inputMessage);
     request->send(200, "text/html", "HTTP GET request sent to your ESP on input field (" 
                                      + inputParam + ") with value: " + inputMessage +
-                                     "<br><a href=\"/\">Return to Home Page</a>");
+                                     "<br>Response code: " + retval + ".<br><a href=\"/\">Return to Home Page</a>");
+    });
+
+  //server.on("/upload", HTTP_POST, [] (AsyncWebServerRequest *request){
+  //  handlegif();
+  //});
+
+  server.onFileUpload([](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final){
+    if(!index){
+      Serial.printf("UploadStart: %s\n", filename.c_str());
+    }
+    int retval = handlegif(data, len);
+    String retvalStr = "" + retval;
+    if(final){
+      Serial.printf("UploadEnd: %s (%u)\n", filename.c_str(), index+len);
+    }
+    request->send(200, "text/html", "File uploaded.<br>Response code: " + retvalStr + ".<br><a href=\"/\">Return to Home Page</a>");
   });
+
   server.onNotFound(notFound);
   server.begin();
   delay(100);
